@@ -23,6 +23,7 @@ defmodule Commanded.EventStore.Adapters.Spear.Mapper do
           body: body,
           type: type,
           metadata: %{
+            commit_position: commit_position,
             stream_revision: stream_revision,
             stream_name: stream_name,
             created: created,
@@ -33,34 +34,46 @@ defmodule Commanded.EventStore.Adapters.Spear.Mapper do
         serializer,
         stream_prefix
       ) do
-    event_number =
-      if link do
-        link.metadata.stream_revision + 1
-      else
-        stream_revision + 1
-      end
-
     metadata =
       case custom_metadata do
         none when none in [nil, ""] -> %{}
         metadata -> serializer.deserialize(metadata, [])
       end
 
+    data = serializer.deserialize(body, type: type)
+
     {causation_id, metadata} = Map.pop(metadata, "$causationId")
     {correlation_id, metadata} = Map.pop(metadata, "$correlationId")
 
-    %RecordedEvent{
+    event = %RecordedEvent{
       event_id: id,
-      event_number: event_number,
+      event_number: commit_position,
       stream_id: to_stream_id(stream_prefix, stream_name),
       stream_version: stream_revision + 1,
       causation_id: causation_id,
       correlation_id: correlation_id,
       event_type: type,
-      data: serializer.deserialize(body, type: type),
+      data: data,
       metadata: metadata,
       created_at: created
     }
+
+    if link do
+      link_payload =
+        if String.starts_with?(link.type, "$") do
+          # we're not parsing system events because the body is sometimes a string
+          # and commanded requires a struct
+          link
+        else
+          to_recorded_event(link, serializer, stream_prefix)
+        end
+
+      metadata = Map.put(event.metadata, :link, link_payload)
+
+      %{event | metadata: metadata}
+    else
+      event
+    end
   end
 
   def to_proposed_message(
